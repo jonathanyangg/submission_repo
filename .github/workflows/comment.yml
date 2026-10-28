@@ -1,0 +1,54 @@
+# Post the validation summary after a fork pull request.
+#
+# A pull_request workflow from a fork gets a read-only token, so its own
+# comment step can be refused. This workflow runs from the default branch,
+# with write permission, and only renders a version-1 summary. It does not
+# execute anything from the artifact. GitHub only starts workflow_run
+# workflows that are already on the default branch.
+name: Comment validation result
+
+on:
+  workflow_run:
+    workflows: ["Validate submission"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout the trusted comment code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Download the validation summary
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: validation-logs
+          path: downloaded
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Comment on the matching pull request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
+        run: |
+          set -eu
+          if [ ! -d downloaded ]; then
+            echo "validation artifact is not available"
+            exit 0
+          fi
+          python3 -m coachbot_ci.comment validation --summary downloaded --pr ""

@@ -1,0 +1,133 @@
+# Queue one hardware run on the lab computer.
+#
+# The job that can reach the robots waits on the "swarm" environment.
+# GitHub does not send that job to the runner until required reviewers
+# approve it. Create the environment and its reviewers BEFORE registering
+# the self-hosted runner. See docs/MIGRATION.md.
+#
+# pull_request_target uses this file from the default branch, not the
+# pull request. Fork authors cannot edit it by opening a pull request.
+# workflow_dispatch is limited to the default branch for the same reason:
+# a dispatch from another branch would execute that branch's copy of this
+# file. Students must not have write access to this repository.
+name: Hardware run
+
+on:
+  workflow_dispatch:
+    inputs:
+      submission_dir:
+        description: "Folder to run, such as submissions/example-orbit"
+        required: true
+        type: string
+      git_ref:
+        description: "40-character commit to read. Empty uses the selected branch tip, which must be main."
+        required: false
+        type: string
+      repository:
+        description: "owner/name that contains the commit. Empty uses this repository."
+        required: false
+        type: string
+      pr_number:
+        description: "Pull request to comment on. Optional."
+        required: false
+        type: string
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  prepare:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request_target' && github.event.action == 'labeled' && github.event.label.name == 'hardware-run')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      repository: ${{ steps.target.outputs.repository }}
+      ref: ${{ steps.target.outputs.ref }}
+      submission_dir: ${{ steps.target.outputs.submission_dir }}
+      pr_number: ${{ steps.target.outputs.pr_number }}
+    steps:
+      - name: Checkout trusted scripts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Resolve the submission without checking it out
+        id: target
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m coachbot_ci.hardware resolve
+
+  hardware:
+    needs: prepare
+    if: needs.prepare.result == 'success'
+    concurrency:
+      group: coachbot-swarm-hardware
+      cancel-in-progress: false
+    environment: swarm
+    runs-on: [self-hosted, coachbot-lab]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout trusted scripts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Checkout the submission as data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.prepare.outputs.repository }}
+          ref: ${{ needs.prepare.outputs.ref }}
+          path: untrusted
+          persist-credentials: false
+
+      - name: Call the lab script
+        working-directory: trusted
+        env:
+          COACHBOT_RUN_SCRIPT: ${{ secrets.COACHBOT_RUN_SCRIPT }}
+          SUBMISSION_DIR: ${{ needs.prepare.outputs.submission_dir }}
+        run: |
+          set -eu
+          python3 -m coachbot_ci.hardware run \
+            --submission-dir "$GITHUB_WORKSPACE/untrusted/$SUBMISSION_DIR" \
+            --output-dir "$GITHUB_WORKSPACE/hardware-results" \
+            --user-code-timeout-sec 600 \
+            --wall-timeout-sec 2400
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardware-results
+          path: hardware-results
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Comment on the pull request
+        if: always() && needs.prepare.outputs.pr_number != ''
+        working-directory: trusted
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          if [ ! -f "$GITHUB_WORKSPACE/hardware-results/hardware-result.json" ]; then
+            echo "no hardware result to comment on"
+            exit 0
+          fi
+          python3 -m coachbot_ci.comment hardware --result "$GITHUB_WORKSPACE/hardware-results/hardware-result.json"

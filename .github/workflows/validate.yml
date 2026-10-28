@@ -1,0 +1,95 @@
+# Static checks and a short headless simulation. This workflow runs on
+# GitHub-hosted runners only. It must never target the lab computer:
+# fork pull requests execute the copy of this file from the pull request,
+# and that copy is untrusted.
+name: Validate submission
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      submission_dir:
+        description: "Folder to check, such as submissions/example-orbit. Empty checks every folder."
+        required: false
+        type: string
+      sim_seconds:
+        description: "Simulated seconds for the headless run (1-120)."
+        required: false
+        default: "60"
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: coachbot-validate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout the pull request
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create a virtual environment
+        run: python3 -m venv .venv
+
+      - name: Install simulator dependencies
+        run: .venv/bin/pip install --disable-pip-version-check -r requirements-simulator.txt
+
+      - name: Pull the Python 2.7 image
+        run: docker pull python:2.7.18-slim
+
+      - name: Fetch the pinned simulator
+        run: .venv/bin/python -m coachbot_ci.simulate fetch third_party/swarm-simulator
+
+      - name: Unit tests
+        env:
+          SIMULATOR_DIR: third_party/swarm-simulator
+        run: .venv/bin/python -m unittest discover -s tests -v
+
+      - name: Validate submissions
+        env:
+          SUBMISSION_DIR: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.submission_dir || '' }}
+          SIM_SECONDS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.sim_seconds || '60' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMIT_SHA: ${{ github.sha }}
+          SIMULATOR_DIR: third_party/swarm-simulator
+          VALIDATION_LOG_DIR: validation-logs
+        run: |
+          set -eu
+          mkdir -p validation-logs
+          .venv/bin/python -m coachbot_ci.validate --root "$GITHUB_WORKSPACE" --summary "$GITHUB_WORKSPACE/validation-logs/validation-summary.json"
+
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-logs
+          path: validation-logs
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Comment on the pull request
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          if [ ! -x .venv/bin/python ] || [ ! -f validation-logs/validation-summary.json ]; then
+            echo "validation summary is not available"
+            exit 0
+          fi
+          .venv/bin/python -m coachbot_ci.comment validation --summary validation-logs/validation-summary.json
