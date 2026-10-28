@@ -1,1 +1,6 @@
+# The queue repository already ignored loose shell scripts. Kept as-is.
 *.sh
+validation-logs/
+hardware-results/
+third_party/
+.venv/

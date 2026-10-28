@@ -1,0 +1,6 @@
+# Dependencies of michelleezhang/swarm-simulator at commit 25c8ea3.
+# The validation job installs these so it can import the simulator.
+# The robots do not use this file.
+numpy>=1.26
+pygame>=2.5
+matplotlib>=3.8
